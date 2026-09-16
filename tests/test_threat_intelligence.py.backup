@@ -1,0 +1,739 @@
+from app.intelligence.providers.abuseipdb import (
+    AbuseIPDBProvider,
+)
+
+from app.intelligence.providers.ipinfo import (
+    IPInfoProvider,
+)
+
+from app.intelligence.providers.mock import (
+    MockThreatIntelProvider,
+)
+
+from app.intelligence.service import (
+    ThreatIntelligenceService,
+    create_default_threat_intelligence_service,
+)
+
+import httpx
+
+
+# =================================================================
+# MOCK PROVIDER TESTS
+# =================================================================
+
+
+def test_mock_provider_supports_ioc_types():
+
+    provider = MockThreatIntelProvider()
+
+    assert provider.supports("ip")
+    assert provider.supports("domain")
+    assert provider.supports("url")
+
+
+def test_mock_provider_returns_simulated_result():
+
+    provider = MockThreatIntelProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.provider == "mock"
+    assert result.status == "success"
+    assert result.is_mock is True
+    assert result.reputation == "unknown"
+    assert result.confidence == 1.0
+
+
+def test_mock_provider_rejects_unsupported_type():
+
+    provider = MockThreatIntelProvider()
+
+    result = provider.lookup(
+        indicator="test@example.com",
+        indicator_type="email",
+    )
+
+    assert result.status == "unsupported"
+    assert result.is_mock is True
+
+
+# =================================================================
+# SERVICE TESTS
+# =================================================================
+
+
+def test_service_lookup():
+
+    service = ThreatIntelligenceService(
+        providers=[
+            MockThreatIntelProvider(),
+        ]
+    )
+
+    result = service.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result["status"] == "complete"
+    assert result["provider_count"] == 1
+    assert result["successful_results"] == 1
+
+    assert (
+        result["results"][0]["is_mock"]
+        is True
+    )
+
+
+def test_service_handles_missing_provider():
+
+    service = ThreatIntelligenceService()
+
+    result = service.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result["status"] == "no_provider"
+
+    assert result["results"] == []
+
+
+def test_enrich_iocs():
+
+    service = ThreatIntelligenceService(
+        providers=[
+            MockThreatIntelProvider(),
+        ]
+    )
+
+    iocs = {
+        "ips": [
+            "8.8.8.8",
+        ],
+        "domains": [
+            "example.com",
+        ],
+        "urls": [
+            "https://example.com/login",
+        ],
+    }
+
+    result = service.enrich_iocs(iocs)
+
+    assert result["status"] == "complete"
+
+    assert len(
+        result["results"]["ips"]
+    ) == 1
+
+    assert len(
+        result["results"]["domains"]
+    ) == 1
+
+    assert len(
+        result["results"]["urls"]
+    ) == 1
+
+    assert (
+        result["results"]["ips"][0]
+        ["results"][0]
+        ["is_mock"]
+        is True
+    )
+
+
+# =================================================================
+# REAL PROVIDER TESTS
+# =================================================================
+
+
+# -----------------------------------------------------------------
+# IPINFO - Missing API Key
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_without_api_key():
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "unavailable"
+
+    assert (
+        result.provider
+        == "ipinfo_lite"
+    )
+
+
+# -----------------------------------------------------------------
+# ABUSEIPDB - Missing API Key
+# -----------------------------------------------------------------
+
+
+def test_abuseipdb_without_api_key():
+
+    provider = AbuseIPDBProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "unavailable"
+
+    assert (
+        result.provider
+        == "abuseipdb"
+    )
+
+
+# -----------------------------------------------------------------
+# IPINFO - Unsupported Indicator Type
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_rejects_non_ip():
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="example.com",
+        indicator_type="domain",
+    )
+
+    assert result.status == "unsupported"
+
+    assert (
+        result.provider
+        == "ipinfo_lite"
+    )
+
+
+# -----------------------------------------------------------------
+# ABUSEIPDB - Unsupported Indicator Type
+# -----------------------------------------------------------------
+
+
+def test_abuseipdb_rejects_non_ip():
+
+    provider = AbuseIPDBProvider()
+
+    result = provider.lookup(
+        indicator="example.com",
+        indicator_type="domain",
+    )
+
+    assert result.status == "unsupported"
+
+    assert (
+        result.provider
+        == "abuseipdb"
+    )
+
+
+# =================================================================
+# IPINFO PROVIDER TESTS
+# =================================================================
+
+
+# -----------------------------------------------------------------
+# IPINFO - Supports IP
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_supports_ip():
+
+    provider = IPInfoProvider()
+
+    assert provider.supports("ip")
+
+
+# -----------------------------------------------------------------
+# IPINFO - Invalid IP
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_rejects_invalid_ip(monkeypatch):
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="999.999.999.999",
+        indicator_type="ip",
+    )
+
+    assert result.status == "invalid"
+
+    assert (
+        result.provider
+        == "ipinfo_lite"
+    )
+
+
+# -----------------------------------------------------------------
+# IPINFO - Successful API Response
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_success(monkeypatch):
+
+    class MockResponse:
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+
+            return {
+                "ip": "8.8.8.8",
+                "country_code": "US",
+                "country": "United States",
+                "continent_code": "NA",
+                "continent": "North America",
+                "asn": "AS15169",
+                "as_name": "Google LLC",
+                "as_domain": "google.com",
+            }
+
+    def mock_get(*args, **kwargs):
+
+        return MockResponse()
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "success"
+
+    assert (
+        result.provider
+        == "ipinfo_lite"
+    )
+
+    assert (
+        result.reputation
+        == "unknown"
+    )
+
+    assert result.confidence == 0.90
+
+    assert (
+        result.data["country_code"]
+        == "US"
+    )
+
+    assert (
+        result.data["country"]
+        == "United States"
+    )
+
+    assert (
+        result.data["continent_code"]
+        == "NA"
+    )
+
+    assert (
+        result.data["continent"]
+        == "North America"
+    )
+
+    assert (
+        result.data["asn"]
+        == "AS15169"
+    )
+
+    assert (
+        result.data["as_name"]
+        == "Google LLC"
+    )
+
+    assert (
+        result.data["as_domain"]
+        == "google.com"
+    )
+
+    assert len(result.evidence) == 3
+
+
+# -----------------------------------------------------------------
+# IPINFO - HTTP Error
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_http_error(monkeypatch):
+
+    class MockResponse:
+
+        status_code = 401
+
+        def raise_for_status(self):
+
+            request = httpx.Request(
+                "GET",
+                "https://api.ipinfo.io/lite/8.8.8.8",
+            )
+
+            response = httpx.Response(
+                401,
+                request=request,
+            )
+
+            raise httpx.HTTPStatusError(
+                "Unauthorized",
+                request=request,
+                response=response,
+            )
+
+    def mock_get(*args, **kwargs):
+
+        return MockResponse()
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "invalid-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "error"
+
+    assert "401" in result.errors[0]
+
+
+# -----------------------------------------------------------------
+# IPINFO - Network Error
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_network_error(monkeypatch):
+
+    def mock_get(*args, **kwargs):
+
+        raise httpx.ConnectError(
+            "Connection failed"
+        )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "error"
+
+    assert (
+        "IPinfo request error"
+        in result.errors[0]
+    )
+
+
+# -----------------------------------------------------------------
+# IPINFO - Invalid JSON
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_invalid_json(monkeypatch):
+
+    class MockResponse:
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+
+            raise ValueError(
+                "Invalid JSON"
+            )
+
+    def mock_get(*args, **kwargs):
+
+        return MockResponse()
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "error"
+
+    assert (
+        result.errors[0]
+        == "IPinfo returned invalid JSON."
+    )
+
+
+# -----------------------------------------------------------------
+# IPINFO - Correct Request
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_sends_correct_request(
+    monkeypatch,
+):
+
+    captured = {}
+
+    class MockResponse:
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+
+            return {
+                "ip": "8.8.8.8",
+                "country_code": "US",
+                "country": "United States",
+                "continent_code": "NA",
+                "continent": "North America",
+                "asn": "AS15169",
+                "as_name": "Google LLC",
+                "as_domain": "google.com",
+            }
+
+    def mock_get(
+        url,
+        params,
+        timeout,
+    ):
+
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+
+        return MockResponse()
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 7,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="8.8.8.8",
+        indicator_type="ip",
+    )
+
+    assert result.status == "success"
+
+    assert (
+        captured["url"]
+        == "https://api.ipinfo.io/lite/8.8.8.8"
+    )
+
+    assert (
+        captured["params"]["token"]
+        == "test-token"
+    )
+
+    assert captured["timeout"] == 7
+
+
+# -----------------------------------------------------------------
+# IPINFO - Whitespace Handling
+# -----------------------------------------------------------------
+
+
+def test_ipinfo_strips_whitespace(
+    monkeypatch,
+):
+
+    class MockResponse:
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+
+            return {
+                "country_code": "US",
+                "country": "United States",
+                "continent_code": "NA",
+                "continent": "North America",
+                "asn": "AS15169",
+                "as_name": "Google LLC",
+                "as_domain": "google.com",
+            }
+
+    def mock_get(
+        url,
+        params,
+        timeout,
+    ):
+
+        assert (
+            url
+            == "https://api.ipinfo.io/lite/8.8.8.8"
+        )
+
+        return MockResponse()
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.httpx.get",
+        mock_get,
+    )
+
+    monkeypatch.setattr(
+        "app.intelligence.providers.ipinfo.get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "ipinfo_token": "test-token",
+                "threat_intel_timeout_seconds": 5,
+            },
+        )(),
+    )
+
+    provider = IPInfoProvider()
+
+    result = provider.lookup(
+        indicator="  8.8.8.8  ",
+        indicator_type="ip",
+    )
+
+    assert result.status == "success"
+
+    assert (
+        result.indicator
+        == "8.8.8.8"
+    )
+
+
+# =================================================================
+# DEFAULT SERVICE TEST
+# =================================================================
+
+
+def test_default_service_has_ip_providers():
+
+    service = (
+        create_default_threat_intelligence_service()
+    )
+
+    ip_providers = (
+        service.get_providers_for_indicator("ip")
+    )
+
+    provider_names = {
+        provider.name
+        for provider in ip_providers
+    }
+
+    assert (
+        "ipinfo_lite"
+        in provider_names
+    )
+
+    assert (
+        "abuseipdb"
+        in provider_names
+    )

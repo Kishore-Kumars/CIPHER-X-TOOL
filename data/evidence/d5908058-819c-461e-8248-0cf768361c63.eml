@@ -1,0 +1,20 @@
+From: CEO <ceo@company.com>
+To: employee@company.com
+Reply-To: finance@external-example.com
+Return-Path: <mailer@external-example.com>
+Subject: Urgent Payment Request
+Message-ID: <cipherx-test-001@company.com>
+Date: Tue, 15 Sep 2026 10:00:00 +0530
+Received: from mail.example.com (203.0.113.10) by mx.company.com
+Received: from relay.example.net (198.51.100.20) by mail.example.com
+Authentication-Results: mx.company.com; spf=pass; dkim=fail; dmarc=fail
+Content-Type: text/plain; charset="UTF-8"
+
+Hello,
+
+This is an urgent request.
+
+Please process the payment immediately.
+
+Regards,
+CEO
